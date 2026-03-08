@@ -1,0 +1,24 @@
+[data-theme="dark"] {
+  --app-text-primary: #e6edf5;
+  --app-text-muted: #94a6b8;
+  --app-bg-start: #15191f;
+  --app-bg-end: #212830;
+  --app-shape-a: rgba(214, 142, 49, 0.22);
+  --app-shape-b: rgba(79, 155, 228, 0.16);
+  --app-shape-c: rgba(44, 150, 126, 0.22);
+  --app-top-bg: rgba(22, 27, 34, 0.88);
+  --app-nav-bg: rgba(26, 32, 40, 0.88);
+  --app-nav-border: rgba(148, 166, 184, 0.22);
+  --app-panel-bg: rgba(31, 38, 47, 0.88);
+  --app-panel-border: rgba(173, 188, 203, 0.2);
+  --app-panel-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
+  --app-status-bg: #1a2733;
+  --app-status-border: rgba(255, 255, 255, 0.18);
+  --app-terminal-bg: #0d131a;
+  --app-terminal-border: rgba(148, 166, 184, 0.2);
+  --app-terminal-text: #bfd1e2;
+  --app-terminal-success: #63d1a3;
+  --app-terminal-error: #ff8f8f;
+  --app-code-bg: #1c232c;
+  --app-code-border: rgba(148, 166, 184, 0.28);
+}

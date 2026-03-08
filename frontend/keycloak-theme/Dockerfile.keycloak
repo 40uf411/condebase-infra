@@ -1,0 +1,19 @@
+FROM node:20-alpine AS theme-builder
+
+WORKDIR /app
+
+RUN apk add --no-cache openjdk17-jre maven
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+RUN npx keycloakify update-kc-gen \
+    && npm run build-keycloak-theme
+
+
+FROM quay.io/keycloak/keycloak:latest
+
+COPY --from=theme-builder /app/dist_keycloak/*.jar /opt/keycloak/providers/
+COPY --from=theme-builder /app/custom-themes/ /opt/keycloak/themes/

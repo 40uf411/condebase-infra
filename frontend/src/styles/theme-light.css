@@ -1,0 +1,25 @@
+:root,
+[data-theme="light"] {
+  --app-text-primary: #1d232b;
+  --app-text-muted: #5e6a78;
+  --app-bg-start: #f4f0e8;
+  --app-bg-end: #ece7de;
+  --app-shape-a: rgba(205, 148, 65, 0.26);
+  --app-shape-b: rgba(70, 134, 194, 0.2);
+  --app-shape-c: rgba(31, 123, 104, 0.24);
+  --app-top-bg: rgba(245, 242, 237, 0.86);
+  --app-nav-bg: rgba(251, 249, 245, 0.82);
+  --app-nav-border: rgba(34, 40, 48, 0.12);
+  --app-panel-bg: rgba(255, 253, 250, 0.86);
+  --app-panel-border: rgba(31, 39, 49, 0.12);
+  --app-panel-shadow: 0 16px 42px rgba(30, 34, 44, 0.12);
+  --app-status-bg: #2f3f4e;
+  --app-status-border: rgba(255, 255, 255, 0.2);
+  --app-terminal-bg: #131b24;
+  --app-terminal-border: rgba(197, 210, 224, 0.2);
+  --app-terminal-text: #d6e4f0;
+  --app-terminal-success: #6ed1a8;
+  --app-terminal-error: #ff8f8f;
+  --app-code-bg: #f8f5ef;
+  --app-code-border: rgba(27, 37, 47, 0.18);
+}

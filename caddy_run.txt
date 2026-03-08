@@ -1,0 +1,1 @@
+C:\Tools\Caddy\caddy.exe run --config A:\workspace\keycloak-docker\infra\Caddyfile --adapter caddyfile

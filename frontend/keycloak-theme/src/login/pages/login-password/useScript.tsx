@@ -1,0 +1,62 @@
+import { useEffect } from "react";
+import { assert } from "tsafe/assert";
+import { useInsertScriptTags } from "@keycloakify/login-ui/tools/useInsertScriptTags";
+import { waitForElementMountedOnDom } from "@keycloakify/login-ui/tools/waitForElementMountedOnDom";
+import { useI18n } from "../../i18n";
+import { useKcContext } from "../../KcContext";
+
+export function useScript(params: { webAuthnButtonId: string }) {
+    const { webAuthnButtonId } = params;
+
+    const { kcContext } = useKcContext();
+    assert(kcContext.pageId === "login-password.ftl");
+
+    const { msgStr, isFetchingTranslations } = useI18n();
+
+    const { insertScriptTags } = useInsertScriptTags({
+        effectId: "LoginPassword",
+        scriptTags: [
+            {
+                type: "module",
+                textContent: () => `
+                    import { authenticateByWebAuthn } from "${kcContext.url.resourcesPath}/js/webauthnAuthenticate.js";
+                    import { initAuthenticate } from "${kcContext.url.resourcesPath}/js/passkeysConditionalAuth.js";
+
+                    const authButton = document.getElementById("${webAuthnButtonId}");
+                    const input = {
+                        isUserIdentified : ${kcContext.isUserIdentified},
+                        challenge : ${JSON.stringify(kcContext.challenge)},
+                        userVerification : ${JSON.stringify(kcContext.userVerification)},
+                        rpId : ${JSON.stringify(kcContext.rpId)},
+                        createTimeout : ${kcContext.createTimeout}
+                    };
+                    authButton.addEventListener("click", () => {
+                        authenticateByWebAuthn({
+                            ...input,
+                            errmsg : ${JSON.stringify(msgStr("webauthn-unsupported-browser-text"))}
+                        });
+                    }, { once: true });
+
+                    initAuthenticate({
+                        ...input,
+                        errmsg : ${JSON.stringify(msgStr("passkey-unsupported-browser-text"))}
+                    });
+                `
+            }
+        ]
+    });
+
+    useEffect(() => {
+        if (isFetchingTranslations || kcContext.enableWebAuthnConditionalUI !== true) {
+            return;
+        }
+
+        (async () => {
+            await waitForElementMountedOnDom({
+                elementId: webAuthnButtonId
+            });
+
+            insertScriptTags();
+        })();
+    }, [isFetchingTranslations]);
+}
