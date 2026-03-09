@@ -21,10 +21,28 @@ async function parseJsonIfAvailable(response) {
 }
 
 function createRequestError(response, payload) {
-  const detail = payload?.detail || `Request failed with status ${response.status}`;
+  const retryAfterHeader = response.headers.get("retry-after");
+  const retryAfterPayload = payload?.retryAfterSeconds;
+  const retryAfterRaw = retryAfterPayload ?? retryAfterHeader;
+  const retryAfterSeconds = Number.isFinite(Number(retryAfterRaw)) ? Number(retryAfterRaw) : null;
+
+  let detail = `Request failed with status ${response.status}`;
+  if (typeof payload?.detail === "string" && payload.detail.trim()) {
+    detail = payload.detail;
+  }
+
+  if (response.status === 429) {
+    detail =
+      retryAfterSeconds && retryAfterSeconds > 0
+        ? `Too many requests. Try again in ${retryAfterSeconds} second${retryAfterSeconds === 1 ? "" : "s"}.`
+        : "Too many requests. Please try again shortly.";
+  }
+
   const error = new Error(detail);
   error.status = response.status;
   error.payload = payload;
+  error.retryAfterSeconds = retryAfterSeconds;
+  error.requestId = response.headers.get("x-request-id");
   return error;
 }
 

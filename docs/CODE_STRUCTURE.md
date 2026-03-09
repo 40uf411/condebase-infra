@@ -26,7 +26,7 @@ Primary files:
 
 Responsibilities:
 
-- Starts `redis`, `keycloak`, `auth-backend`, and `auth-frontend`.
+- Starts `redis`, `keycloak`, `auth-backend`, `auth-worker`, and `auth-frontend`.
 - Builds Keycloak from `frontend/keycloak-theme/Dockerfile.keycloak`, bundling the custom theme JAR.
 - Uses external PostgreSQL for both Keycloak and the backend mirror table (`app_users`).
 - Terminates local TLS with Caddy (`tls internal`).
@@ -53,22 +53,38 @@ backend/
       router.py             # Aggregates all routers
       routers/
         auth.py             # /auth/login/register/callback/me/logout
+        entities.py         # /entities/* generated-model CRUD APIs
         health.py           # /healthz
+        jobs.py             # /jobs/* enqueue + metrics
         profile.py          # /profile + picture + preferences
     core/
       config.py             # Typed settings + validators
+      authorization.py      # Role extraction + permission checks
       security.py           # PKCE + state + safe return-path helpers
     domain/
       preferences.py        # Preference normalize/serialize helpers
+    entities/
+      model.py              # Entity model schema validation + normalization
     services/
+      activity_logger.py    # Structured activity and security-event logger
+      job_executor.py       # Worker-side dispatcher for queued job types
+      job_queue.py          # Redis queue enqueue/dequeue/retry/dead-letter helpers
       keycloak_oidc.py      # OIDC authorize/token/userinfo/logout + profile updates
       media.py              # Avatar storage + validation helpers
+      rate_limit.py         # Redis-backed global/auth rate limits + bruteforce counters
       serializers.py        # Session -> API profile payload mapping
       sessions.py           # Session create/read/delete + TTL refresh
+    notifications/
+      service.py            # Template rendering + provider selection
+      providers/            # Email provider abstraction (log/smtp/ses)
+      templates/            # Reusable text/html email templates
     stores/
+      activity_store.py     # activity_logs table write adapter
+      entity_store.py       # Dynamic entity CRUD store with base UUID + soft-delete fields
       redis_store.py        # Redis JSON helpers
       user_store.py         # app_users table init + upsert
     main.py                 # FastAPI app + lifespan initialization
+    worker.py               # Background worker process entrypoint
   requirements.txt
   .env.example
   Dockerfile
@@ -120,9 +136,19 @@ backend/
 - Deletes Redis session and clears auth cookies.
 - Returns Keycloak logout URL for frontend redirect.
 
+8. `POST /jobs/*` and `GET /jobs/metrics`
+- Admin permission-gated endpoints to enqueue async jobs and inspect queue metrics.
+- Worker process consumes queued jobs and handles retries/dead-letter routing.
+
+9. `GET/POST/PATCH/DELETE /entities/*`
+- Entity CRUD endpoints generated from `app/generated/entities_model.json`.
+- Every generated table includes base columns: `id`, `created_at`, `updated_at`, `deleted_at` (soft delete).
+- List reads are parameterized and paginated (`limit`/`offset`) with optional secure search (`q`).
+
 ### Session Model
 
 - Session storage: Redis JSON payload keyed by session id.
+- Session cookie values are HMAC-signed with key-id support for secret rotation.
 - Sliding TTL: each successful read refreshes expiry.
 - Browser stores only session/CSRF cookies; tokens remain server-side.
 - Local profile-picture URL is persisted in session and rehydrated on login if a local avatar exists.
@@ -207,5 +233,11 @@ frontend/keycloak-theme/
 - HTTPS local TLS via Caddy for all public hosts.
 - Cookie-based backend sessions (BFF pattern).
 - CSRF double-submit protection.
+- Global and auth-flow specific rate limits (Redis counters).
+- Login brute-force lockouts per client identifier.
+- Route-level and service-level RBAC permission guards.
+- Security headers middleware and per-request request-id response header.
+- Persistent activity logging for HTTP, auth, profile, and security events.
+- Async processing backbone via Redis queue + worker for notification/webhook/image/task jobs.
 - Strict return path validation (`safe_return_to`) to block open redirects.
 - CORS allow-list with credentials and wildcard guardrails.

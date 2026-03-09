@@ -18,6 +18,7 @@ Backend traffic for the SPA is same-origin through `https://app.local/api/*` (pr
 - `https://auth.local` -> Keycloak UI and OIDC endpoints.
 - `https://api.local` -> direct backend host (kept for diagnostics/manual API checks).
 - Redis stores login state and authenticated sessions.
+- A dedicated background worker processes queued email, webhook, image-processing, and async task jobs.
 
 ## Core Functionality
 
@@ -44,9 +45,20 @@ Backend traffic for the SPA is same-origin through `https://app.local/api/*` (pr
   - Caddy serves local TLS certs (`tls internal`) for `app.local`, `api.local`, `auth.local`.
 - Cookie session auth:
   - `app_session` (HttpOnly) and `csrf_token` cookies, backend-validated session in Redis.
-  - Host-only cookie fallback for single-label domains (`.local` config is normalized to host-only).
+  - HMAC-signed session cookie with key-id based signing-key rotation support.
+- Host-only cookie fallback for single-label domains (`.local` config is normalized to host-only).
 - CSRF protection:
   - Double-submit pattern: `csrf_token` cookie + `X-CSRF-Token` header + session token match.
+- Security hardening:
+  - Redis-backed global/auth rate limits, login brute-force lockouts, and strict security response headers.
+  - RBAC permission checks for protected route/service actions.
+  - Persistent `activity_logs` audit table for request/auth/profile/security events.
+- Background and notifications:
+  - Redis queue and worker for async jobs (emails, webhooks, image processing, generic tasks).
+  - Notification module with provider abstraction (`log`, `smtp`, `ses`) and reusable email templates.
+- Business model expansion:
+  - JSON-driven entity model generator with automatic table creation and secured CRUD endpoints.
+  - Base entity fields on every generated model: `id` (UUID), `created_at`, `updated_at`, `deleted_at` (soft delete).
 - CORS:
   - Explicit origin allow-list, credentials enabled, wildcard blocked by settings validation.
 

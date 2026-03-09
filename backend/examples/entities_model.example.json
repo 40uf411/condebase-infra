@@ -1,0 +1,32 @@
+{
+  "entities": [
+    {
+      "name": "customer",
+      "table": "customers",
+      "primary_key": "id",
+      "attributes": [
+        { "name": "email", "type": "string", "nullable": false, "unique": true, "max_length": 255 },
+        { "name": "full_name", "type": "string", "nullable": false, "max_length": 180 },
+        { "name": "status", "type": "string", "nullable": false, "default": "active", "max_length": 40 },
+        { "name": "profile", "type": "json", "nullable": true }
+      ],
+      "foreign_keys": [],
+      "searchable_fields": ["email", "full_name", "status"]
+    },
+    {
+      "name": "invoice",
+      "table": "invoices",
+      "primary_key": "id",
+      "attributes": [
+        { "name": "customer_id", "type": "uuid", "nullable": false },
+        { "name": "amount", "type": "number", "nullable": false },
+        { "name": "currency", "type": "string", "nullable": false, "default": "EUR", "max_length": 8 },
+        { "name": "due_at", "type": "date", "nullable": true }
+      ],
+      "foreign_keys": [
+        { "column": "customer_id", "references": "customers.id", "on_delete": "CASCADE" }
+      ],
+      "searchable_fields": ["currency"]
+    }
+  ]
+}

@@ -4,25 +4,39 @@ import secrets
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from starlette.responses import JSONResponse, RedirectResponse
 
+from ...core.authorization import extract_roles, permissions_for_roles
 from ...core.config import get_settings
 from ..deps import (
     clear_auth_cookies,
+    get_activity_logger,
     get_redis_store,
     get_user_store,
     optional_session,
+    require_permissions,
     require_csrf,
-    require_session,
     set_auth_cookies,
 )
-from ...core.security import challenge_from_verifier, generate_code_verifier, generate_state, safe_return_to
+from ...core.security import (
+    challenge_from_verifier,
+    generate_code_verifier,
+    generate_state,
+    request_client_ip,
+    safe_return_to,
+)
 from ...domain.preferences import (
     default_web_preferences,
     extract_web_preferences,
     KEYCLOAK_WEB_PREFERENCES_ATTRIBUTE,
     serialize_web_preferences,
+)
+from ...services.rate_limit import (
+    auth_bruteforce_block_ttl,
+    clear_auth_failures,
+    consume_rate_limit,
+    register_auth_failure,
 )
 from ...services.media import find_profile_picture_url
 from ...services.serializers import user_profile_payload
@@ -40,6 +54,60 @@ def _app_url(path: str, *, query: dict[str, str] | None = None) -> str:
     if not query:
         return full
     return f"{full}?{urlencode(query)}"
+
+
+def _auth_identifier(request: Request) -> str:
+    return request_client_ip(request)
+
+
+async def _record_auth_failure(request: Request, *, reason: str) -> tuple[bool, int]:
+    settings = get_settings()
+    blocked, retry_after = await register_auth_failure(
+        get_redis_store(request),
+        identifier=_auth_identifier(request),
+        attempt_limit=settings.login_bruteforce_attempt_limit,
+        window_seconds=settings.login_bruteforce_window_seconds,
+        block_seconds=settings.login_bruteforce_block_seconds,
+    )
+    await get_activity_logger(request).log_event(
+        request=request,
+        event_type="security.auth_failure",
+        event_category="security",
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        metadata={
+            "reason": reason,
+            "blocked": blocked,
+            "retry_after_seconds": retry_after,
+        },
+    )
+    return blocked, retry_after
+
+
+async def _consume_auth_rate_limit(request: Request, *, scope: str) -> tuple[bool, int]:
+    settings = get_settings()
+    result = await consume_rate_limit(
+        get_redis_store(request),
+        scope=f"auth:{scope}",
+        identifier=_auth_identifier(request),
+        limit=settings.auth_rate_limit_requests,
+        window_seconds=settings.auth_rate_limit_window_seconds,
+    )
+    if result.allowed:
+        return True, 0
+
+    await get_activity_logger(request).log_event(
+        request=request,
+        event_type="security.auth_rate_limited",
+        event_category="security",
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        metadata={
+            "scope": scope,
+            "retry_after_seconds": result.retry_after_seconds,
+            "limit": result.limit,
+            "current": result.current,
+        },
+    )
+    return False, result.retry_after_seconds
 
 
 async def _sync_app_user_record(request: Request, session_payload: dict) -> None:
@@ -64,6 +132,28 @@ async def _start_login(
 ) -> RedirectResponse:
     settings = get_settings()
     redis_store = get_redis_store(request)
+    activity_logger = get_activity_logger(request)
+
+    allowed, retry_after = await _consume_auth_rate_limit(request, scope="start")
+    if not allowed:
+        return RedirectResponse(
+            url=_app_url("/", query={"error": "rate_limited", "retry_after": str(retry_after)}),
+            status_code=status.HTTP_302_FOUND,
+        )
+
+    blocked_ttl = await auth_bruteforce_block_ttl(redis_store, identifier=_auth_identifier(request))
+    if blocked_ttl > 0:
+        await activity_logger.log_event(
+            request=request,
+            event_type="security.auth_bruteforce_block",
+            event_category="security",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            metadata={"retry_after_seconds": blocked_ttl},
+        )
+        return RedirectResponse(
+            url=_app_url("/", query={"error": "login_temporarily_blocked", "retry_after": str(blocked_ttl)}),
+            status_code=status.HTTP_302_FOUND,
+        )
 
     state = generate_state()
     code_verifier = generate_code_verifier()
@@ -84,6 +174,13 @@ async def _start_login(
         code_challenge=code_challenge,
         register=register,
         prompt=prompt,
+    )
+    await activity_logger.log_event(
+        request=request,
+        event_type="auth.register_started" if register else "auth.login_started",
+        event_category="auth",
+        status_code=status.HTTP_302_FOUND,
+        metadata={"return_to": safe_path},
     )
     return RedirectResponse(url=authorize_url, status_code=status.HTTP_302_FOUND)
 
@@ -112,18 +209,34 @@ async def auth_callback(
 ) -> RedirectResponse:
     settings = get_settings()
     redis_store = get_redis_store(request)
+    activity_logger = get_activity_logger(request)
+
+    allowed, retry_after = await _consume_auth_rate_limit(request, scope="callback")
+    if not allowed:
+        return RedirectResponse(
+            url=_app_url("/", query={"error": "rate_limited", "retry_after": str(retry_after)}),
+            status_code=status.HTTP_302_FOUND,
+        )
 
     if error:
+        blocked, blocked_retry = await _record_auth_failure(request, reason=f"idp_error:{error}")
         query = {"error": error}
         if error_description:
             query["error_description"] = error_description
+        if blocked:
+            query["error"] = "login_temporarily_blocked"
+            query["retry_after"] = str(blocked_retry)
         return RedirectResponse(
             url=_app_url("/", query=query),
             status_code=status.HTTP_302_FOUND,
         )
     if not code or not state:
+        blocked, blocked_retry = await _record_auth_failure(request, reason="missing_code_or_state")
+        query = {"error": "missing_code_or_state"}
+        if blocked:
+            query = {"error": "login_temporarily_blocked", "retry_after": str(blocked_retry)}
         return RedirectResponse(
-            url=_app_url("/", query={"error": "missing_code_or_state"}),
+            url=_app_url("/", query=query),
             status_code=status.HTTP_302_FOUND,
         )
 
@@ -131,9 +244,13 @@ async def auth_callback(
     login_state = await redis_store.get_json(state_key)
     await redis_store.delete(state_key)
     if login_state is None:
+        blocked, blocked_retry = await _record_auth_failure(request, reason="invalid_or_expired_state")
         logger.warning("OIDC callback rejected: invalid or expired state: %s", state)
+        query = {"error": "invalid_or_expired_state"}
+        if blocked:
+            query = {"error": "login_temporarily_blocked", "retry_after": str(blocked_retry)}
         return RedirectResponse(
-            url=_app_url("/", query={"error": "invalid_or_expired_state"}),
+            url=_app_url("/", query=query),
             status_code=status.HTTP_302_FOUND,
         )
 
@@ -144,11 +261,13 @@ async def auth_callback(
         )
         userinfo = await request.app.state.keycloak.fetch_userinfo(tokens["access_token"])
     except KeyError as exc:
+        await _record_auth_failure(request, reason="missing_token_fields")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Missing token fields from identity provider",
         ) from exc
     except httpx.HTTPStatusError as exc:
+        await _record_auth_failure(request, reason=f"idp_http_status:{exc.response.status_code}")
         status_code = exc.response.status_code
         response_text = exc.response.text.strip()
         logger.error(
@@ -161,6 +280,7 @@ async def auth_callback(
             detail=f"Identity provider exchange failed ({status_code})",
         ) from exc
     except httpx.HTTPError as exc:
+        await _record_auth_failure(request, reason="idp_transport_error")
         logger.error("Keycloak transport error during callback: %s", str(exc))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -183,6 +303,13 @@ async def auth_callback(
         serialized_preferences = serialize_web_preferences(preferences)
         userinfo.setdefault(KEYCLOAK_WEB_PREFERENCES_ATTRIBUTE, serialized_preferences)
 
+    roles = extract_roles(
+        userinfo=userinfo if isinstance(userinfo, dict) else {},
+        access_token=tokens.get("access_token"),
+        client_id=settings.keycloak_client_id,
+    )
+    permissions = permissions_for_roles(roles)
+
     csrf_token = secrets.token_urlsafe(24)
     session_id = secrets.token_urlsafe(32)
     session_payload = {
@@ -201,6 +328,8 @@ async def auth_callback(
         "csrf_token": csrf_token,
         "issued_at": datetime.now(timezone.utc).isoformat(),
         "preferences": preferences,
+        "roles": roles,
+        "permissions": permissions,
     }
 
     local_picture = find_profile_picture_url(settings, userinfo.get("sub"))
@@ -223,6 +352,19 @@ async def auth_callback(
         session_id=session_id,
         payload=session_payload,
         ttl_seconds=settings.session_ttl_seconds,
+    )
+
+    await clear_auth_failures(redis_store, identifier=_auth_identifier(request))
+    await activity_logger.log_event(
+        request=request,
+        event_type="auth.login_success",
+        event_category="auth",
+        status_code=status.HTTP_302_FOUND,
+        session=session_payload,
+        metadata={
+            "return_to": login_state.get("return_to", "/profile"),
+            "roles": roles,
+        },
     )
 
     redirect_to = _app_url(login_state.get("return_to", "/profile"))
@@ -250,12 +392,14 @@ async def auth_me(request: Request) -> dict:
 
 
 @router.post("/logout")
-async def auth_logout(request: Request) -> JSONResponse:
+async def auth_logout(
+    request: Request,
+    session: dict = Depends(require_permissions("auth:logout")),
+) -> JSONResponse:
     settings = get_settings()
-    session = await require_session(request)
     require_csrf(request, session)
 
-    session_id = request.cookies.get(settings.cookie_name)
+    session_id = getattr(request.state, "session_id", None)
     if session_id:
         await delete_session(get_redis_store(request), session_id)
 
@@ -265,4 +409,11 @@ async def auth_logout(request: Request) -> JSONResponse:
     )
     response = JSONResponse({"ok": True, "logoutUrl": logout_url})
     clear_auth_cookies(response, settings=settings)
+    await get_activity_logger(request).log_event(
+        request=request,
+        event_type="auth.logout",
+        event_category="auth",
+        status_code=status.HTTP_200_OK,
+        session=session,
+    )
     return response

@@ -60,6 +60,27 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  worker:
+    build:
+      context: ../backend
+    container_name: auth-worker
+    env_file:
+      - .env
+    environment:
+      KEYCLOAK_INTERNAL_URL: ${KEYCLOAK_INTERNAL_URL:-http://keycloak:8080}
+      SESSION_REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://appuser:apppassword@host.docker.internal:5432/appdb}
+      MEDIA_DIR: /app/uploads
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - ../backend/uploads:/app/uploads
+    depends_on:
+      - redis
+      - backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
   frontend:
     build:
       context: ../frontend

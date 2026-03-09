@@ -102,6 +102,46 @@ function includesSearch(value, search) {
   return normalizeSearchValue(value).includes(search);
 }
 
+function formatRetrySeconds(rawValue) {
+  const seconds = Number(rawValue);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+  return `${seconds}s`;
+}
+
+function buildCallbackErrorMessage(params, t) {
+  const code = params.get("error");
+  if (!code) {
+    return null;
+  }
+
+  const retryAfter = formatRetrySeconds(params.get("retry_after"));
+  const errorDescription = params.get("error_description");
+
+  switch (code) {
+    case "rate_limited":
+      return retryAfter
+        ? t("callbackErrorRateLimited", { retry: retryAfter })
+        : t("callbackErrorRateLimitedNoRetry");
+    case "login_temporarily_blocked":
+      return retryAfter
+        ? t("callbackErrorLoginBlocked", { retry: retryAfter })
+        : t("callbackErrorLoginBlockedNoRetry");
+    case "invalid_or_expired_state":
+      return t("callbackErrorInvalidState");
+    case "missing_code_or_state":
+      return t("callbackErrorMissingCodeState");
+    case "access_denied":
+      return t("callbackErrorAccessDenied");
+    default:
+      if (errorDescription) {
+        return `${code}: ${errorDescription}`;
+      }
+      return t("callbackErrorUnknown", { code });
+  }
+}
+
 function createTerminalLine(message, level = "info") {
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -137,13 +177,12 @@ function App() {
   const [statusTime, setStatusTime] = useState(() => new Date());
   const [profileMenuAnchor, setProfileMenuAnchor] = useState(null);
 
-  const callbackError = useMemo(() => {
-    const params = new URLSearchParams(location.search);
-    return params.get("error");
-  }, [location.search]);
-
   const dictionary = useMemo(() => getDictionary(preferences.language), [preferences.language]);
   const t = useCallback((key, params) => translate(dictionary, key, params), [dictionary]);
+  const callbackErrorMessage = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return buildCallbackErrorMessage(params, t);
+  }, [location.search, t]);
   const muiTheme = useMemo(() => (preferences.theme === "dark" ? darkTheme : lightTheme), [preferences.theme]);
   const profileMenuOpen = Boolean(profileMenuAnchor);
   const currentPath = location.pathname;
@@ -334,7 +373,7 @@ function App() {
     return (
       <ThemeProvider theme={muiTheme}>
         <CssBaseline />
-        <IntroPage callbackError={callbackError} loginUrl={loginUrl} registrationUrl={registrationUrl} t={t} />
+        <IntroPage callbackErrorMessage={callbackErrorMessage} loginUrl={loginUrl} registrationUrl={registrationUrl} t={t} />
       </ThemeProvider>
     );
   }
@@ -488,7 +527,7 @@ function App() {
                     <LandingPage
                       authenticated={authState.authenticated}
                       user={authState.user}
-                      callbackError={callbackError}
+                      callbackErrorMessage={callbackErrorMessage}
                       onLogin={onLogin}
                       onRegister={onRegister}
                       onGoProfile={() => onNavigate("/profile")}
@@ -774,7 +813,7 @@ function DetailsPanel({
   );
 }
 
-function IntroPage({ callbackError, loginUrl, registrationUrl, t }) {
+function IntroPage({ callbackErrorMessage, loginUrl, registrationUrl, t }) {
   const introFeatures = [
     {
       icon: <HubRoundedIcon fontSize="small" />,
@@ -822,9 +861,9 @@ function IntroPage({ callbackError, loginUrl, registrationUrl, t }) {
       </header>
 
       <main className="intro-main">
-        {callbackError ? (
+        {callbackErrorMessage ? (
           <Alert severity="warning">
-            {t("callbackErrorPrefix")} <strong>{callbackError}</strong>
+            {t("callbackErrorPrefix")} <strong>{callbackErrorMessage}</strong>
           </Alert>
         ) : null}
 
@@ -914,7 +953,7 @@ function IntroPage({ callbackError, loginUrl, registrationUrl, t }) {
   );
 }
 
-function LandingPage({ authenticated, user, callbackError, onLogin, onRegister, onGoProfile, t, searchQuery }) {
+function LandingPage({ authenticated, user, callbackErrorMessage, onLogin, onRegister, onGoProfile, t, searchQuery }) {
   const displayName = user?.name || user?.email || t("unknownUser");
   const cards = [
     {
@@ -940,9 +979,9 @@ function LandingPage({ authenticated, user, callbackError, onLogin, onRegister, 
 
   return (
     <Stack spacing={2}>
-      {callbackError ? (
+      {callbackErrorMessage ? (
         <Alert severity="warning">
-          {t("callbackErrorPrefix")} <strong>{callbackError}</strong>
+          {t("callbackErrorPrefix")} <strong>{callbackErrorMessage}</strong>
         </Alert>
       ) : null}
 
@@ -1129,6 +1168,14 @@ function ProfilePage({
     { label: t("fieldSub"), value: profile?.sub || "-" },
     { label: t("fieldEmailVerified"), value: String(Boolean(profile?.emailVerified)) },
     { label: t("fieldSessionIssuedAt"), value: profile?.sessionIssuedAt || "-" },
+    {
+      label: t("fieldRoles"),
+      value: Array.isArray(profile?.roles) && profile.roles.length ? profile.roles.join(", ") : "-",
+    },
+    {
+      label: t("fieldPermissions"),
+      value: Array.isArray(profile?.permissions) && profile.permissions.length ? profile.permissions.join(", ") : "-",
+    },
   ];
   const visibleProfileEntries = profileEntries.filter(
     (entry) => includesSearch(entry.label, search) || includesSearch(entry.value, search)

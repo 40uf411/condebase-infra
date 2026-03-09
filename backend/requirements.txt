@@ -6,3 +6,4 @@ pydantic-settings==2.7.1
 python-multipart==0.0.20
 sqlalchemy==2.0.38
 psycopg[binary]==3.2.5
+boto3==1.37.38

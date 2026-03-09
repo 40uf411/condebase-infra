@@ -1,0 +1,8 @@
+Hi {user_name},
+
+Welcome to {app_name}. Your account is ready.
+
+You can sign in at:
+{login_url}
+
+If you did not expect this message, contact support.

@@ -31,6 +31,8 @@ def user_profile_payload(session: dict[str, Any], *, include_tokens: bool = Fals
         "preferences": preferences,
         "preferredLanguage": preferences["language"],
         "theme": preferences["theme"],
+        "roles": session.get("roles") if isinstance(session.get("roles"), list) else [],
+        "permissions": session.get("permissions") if isinstance(session.get("permissions"), list) else [],
         "claims": claims,
         "sessionIssuedAt": session.get("issued_at"),
     }

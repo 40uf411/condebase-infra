@@ -1,6 +1,6 @@
 import json
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://appuser:apppassword@host.docker.internal:5432/appdb"
     session_ttl_seconds: int = 60 * 60 * 24 * 7
     login_state_ttl_seconds: int = 900
+    entities_model_path: str = "app/generated/entities_model.json"
 
     app_base_url: str = "https://app.local"
     api_base_url: str = "https://app.local/api"
@@ -34,6 +35,42 @@ class Settings(BaseSettings):
     cookie_secure: bool = True
     cookie_samesite: Literal["lax", "strict", "none"] = "none"
     cookie_domain: str | None = ".local"
+    session_signing_active_key_id: str = "v1"
+    session_signing_keys: dict[str, str] = Field(default_factory=lambda: {"v1": "replace_me_with_32+_chars"})
+
+    security_headers_enabled: bool = True
+    global_rate_limit_enabled: bool = True
+    global_rate_limit_requests: int = 240
+    global_rate_limit_window_seconds: int = 60
+    auth_rate_limit_requests: int = 30
+    auth_rate_limit_window_seconds: int = 60
+    login_bruteforce_attempt_limit: int = 8
+    login_bruteforce_window_seconds: int = 600
+    login_bruteforce_block_seconds: int = 900
+
+    job_queue_name: str = "app_jobs"
+    job_queue_delayed_name: str = "app_jobs_delayed"
+    job_queue_dead_letter_name: str = "app_jobs_dead"
+    job_worker_poll_seconds: int = 2
+    job_retry_backoff_seconds: int = 10
+    job_default_max_attempts: int = 4
+    job_promote_batch_size: int = 50
+
+    webhook_default_timeout_seconds: int = 10
+    webhook_max_timeout_seconds: int = 60
+
+    notification_provider: Literal["log", "smtp", "ses"] = "log"
+    notification_from_email: str = "no-reply@app.local"
+    notification_templates_dir: str = "app/notifications/templates"
+    smtp_host: str = "localhost"
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_starttls: bool = True
+    smtp_use_ssl: bool = False
+    ses_region_name: str = "us-east-1"
+    ses_configuration_set: str | None = None
+
     media_dir: str = "/app/uploads"
     max_avatar_mb: int = 5
 
@@ -65,6 +102,79 @@ class Settings(BaseSettings):
             return None
 
         return stripped
+
+    @field_validator("session_signing_active_key_id", mode="before")
+    @classmethod
+    def _normalize_session_signing_active_key_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("SESSION_SIGNING_ACTIVE_KEY_ID must not be empty")
+        return normalized
+
+    @field_validator("session_signing_keys", mode="before")
+    @classmethod
+    def _normalize_session_signing_keys(cls, value: dict[str, str] | str | None) -> dict[str, str]:
+        if value is None:
+            return {"v1": "replace_me_with_32+_chars"}
+
+        if isinstance(value, dict):
+            parsed: dict[str, str] = {}
+            for key, secret in value.items():
+                key_id = str(key).strip()
+                signing_secret = str(secret).strip()
+                if key_id and signing_secret:
+                    parsed[key_id] = signing_secret
+            if not parsed:
+                raise ValueError("SESSION_SIGNING_KEYS must define at least one key")
+            return parsed
+
+        raw = value.strip()
+        if not raw:
+            raise ValueError("SESSION_SIGNING_KEYS must not be empty")
+
+        if raw.startswith("{"):
+            loaded = json.loads(raw)
+            if not isinstance(loaded, dict):
+                raise ValueError("SESSION_SIGNING_KEYS JSON value must be an object")
+            return cls._normalize_session_signing_keys(loaded)
+
+        parsed: dict[str, str] = {}
+        for pair in raw.split(","):
+            candidate = pair.strip()
+            if not candidate:
+                continue
+            key_id, separator, secret = candidate.partition(":")
+            if not separator:
+                raise ValueError("SESSION_SIGNING_KEYS must use 'kid:secret' pairs")
+            kid = key_id.strip()
+            signing_secret = secret.strip()
+            if not kid or not signing_secret:
+                raise ValueError("SESSION_SIGNING_KEYS contains an empty key id or secret")
+            parsed[kid] = signing_secret
+
+        if not parsed:
+            raise ValueError("SESSION_SIGNING_KEYS must define at least one key")
+
+        return parsed
+
+    @field_validator("session_signing_keys")
+    @classmethod
+    def _validate_session_signing_keys(cls, value: dict[str, str], info: Any) -> dict[str, str]:
+        for key_id, secret in value.items():
+            if "." in key_id:
+                raise ValueError("SESSION_SIGNING_KEYS key ids must not contain '.'")
+            if len(secret) < 16:
+                raise ValueError(
+                    f"SESSION_SIGNING_KEYS entry '{key_id}' is too short; use at least 16 characters"
+                )
+
+        active_key_id = str(info.data.get("session_signing_active_key_id", "")).strip()
+        if active_key_id and active_key_id not in value:
+            raise ValueError(
+                "SESSION_SIGNING_ACTIVE_KEY_ID must reference an existing key in SESSION_SIGNING_KEYS"
+            )
+
+        return value
 
     @field_validator("allowed_cors_origins", mode="before")
     @classmethod
@@ -112,6 +222,82 @@ class Settings(BaseSettings):
         if not cleaned:
             raise ValueError("DATABASE_URL must not be empty")
         return cleaned
+
+    @field_validator("entities_model_path", mode="before")
+    @classmethod
+    def _normalize_entities_model_path(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("ENTITIES_MODEL_PATH must not be empty")
+        return cleaned
+
+    @field_validator("notification_templates_dir", mode="before")
+    @classmethod
+    def _normalize_notification_templates_dir(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("NOTIFICATION_TEMPLATES_DIR must not be empty")
+        return cleaned
+
+    @field_validator("notification_from_email", mode="before")
+    @classmethod
+    def _normalize_notification_from_email(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("NOTIFICATION_FROM_EMAIL must not be empty")
+        return cleaned
+
+    @field_validator("smtp_username", "smtp_password", "ses_configuration_set", mode="before")
+    @classmethod
+    def _empty_string_to_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @field_validator(
+        "global_rate_limit_requests",
+        "global_rate_limit_window_seconds",
+        "auth_rate_limit_requests",
+        "auth_rate_limit_window_seconds",
+        "login_bruteforce_attempt_limit",
+        "login_bruteforce_window_seconds",
+        "login_bruteforce_block_seconds",
+    )
+    @classmethod
+    def _validate_positive_security_int(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Security rate-limit values must be at least 1")
+        return value
+
+    @field_validator(
+        "job_worker_poll_seconds",
+        "job_retry_backoff_seconds",
+        "job_default_max_attempts",
+        "job_promote_batch_size",
+        "webhook_default_timeout_seconds",
+        "webhook_max_timeout_seconds",
+    )
+    @classmethod
+    def _validate_positive_background_int(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Background job and webhook values must be at least 1")
+        return value
+
+    @field_validator("smtp_port")
+    @classmethod
+    def _validate_smtp_port(cls, value: int) -> int:
+        if value < 1 or value > 65535:
+            raise ValueError("SMTP_PORT must be between 1 and 65535")
+        return value
+
+    @field_validator("webhook_max_timeout_seconds")
+    @classmethod
+    def _validate_webhook_max_timeout(cls, value: int, info: Any) -> int:
+        default_timeout = int(info.data.get("webhook_default_timeout_seconds", 1))
+        if value < default_timeout:
+            raise ValueError("WEBHOOK_MAX_TIMEOUT_SECONDS must be >= WEBHOOK_DEFAULT_TIMEOUT_SECONDS")
+        return value
 
     @field_validator("max_avatar_mb")
     @classmethod

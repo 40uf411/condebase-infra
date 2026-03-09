@@ -1,0 +1,9 @@
+Hi {user_name},
+
+We detected a security-related event for your account:
+{event_name}
+
+Time: {event_time}
+IP: {ip_address}
+
+If this was not you, reset your password and contact support immediately.

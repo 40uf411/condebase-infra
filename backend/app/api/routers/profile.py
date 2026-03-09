@@ -1,11 +1,20 @@
 import logging
+from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, field_validator, model_validator
 
+from ...core.authorization import ensure_permissions
 from ...core.config import get_settings
-from ..deps import get_redis_store, get_user_store, require_csrf, require_session
+from ..deps import (
+    get_activity_logger,
+    get_job_queue,
+    get_redis_store,
+    get_user_store,
+    require_csrf,
+    require_permissions,
+)
 from ...domain.preferences import (
     extract_web_preferences,
     KEYCLOAK_WEB_PREFERENCES_ATTRIBUTE,
@@ -55,9 +64,17 @@ class PreferencesUpdateRequest(BaseModel):
         return self
 
 
-async def _persist_session(request: Request, session: dict) -> None:
+async def _persist_session(
+    request: Request,
+    session: dict,
+    *,
+    required_permission: str | None = None,
+) -> None:
     settings = get_settings()
-    session_id = request.cookies.get(settings.cookie_name)
+    if required_permission:
+        ensure_permissions(session, (required_permission,))
+
+    session_id = getattr(request.state, "session_id", None)
     if not session_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -73,18 +90,19 @@ async def _persist_session(request: Request, session: dict) -> None:
 
 
 @router.get("/profile")
-async def get_profile(request: Request) -> dict:
-    session = await require_session(request)
+async def get_profile(
+    session: dict = Depends(require_permissions("profile:read")),
+) -> dict:
     return {"user": user_profile_payload(session, include_tokens=True)}
 
 
 @router.post("/profile/picture")
 async def upload_profile_picture(
     request: Request,
+    session: dict = Depends(require_permissions("profile:picture:write")),
     file: UploadFile = File(...),
 ) -> dict:
     settings = get_settings()
-    session = await require_session(request)
     require_csrf(request, session)
 
     claims = session.get("userinfo")
@@ -110,14 +128,40 @@ async def upload_profile_picture(
     else:
         session["userinfo"] = {"picture": picture_url, "sub": subject}
 
-    await _persist_session(request, session)
+    await _persist_session(request, session, required_permission="profile:picture:write")
+
+    await get_activity_logger(request).log_event(
+        request=request,
+        event_type="profile.picture_updated",
+        event_category="profile",
+        status_code=status.HTTP_200_OK,
+        session=session,
+        metadata={"picture_url": picture_url},
+    )
+
+    picture_without_query = picture_url.split("?", 1)[0]
+    picture_filename = picture_without_query.rsplit("/", 1)[-1].strip()
+    if picture_filename:
+        try:
+            await get_job_queue(request).enqueue(
+                job_type="images.process_profile_picture",
+                payload={
+                    "subject": subject,
+                    "file_path": str((Path(settings.media_dir) / "avatars" / picture_filename).resolve()),
+                },
+            )
+        except Exception:
+            logger.exception("Failed to enqueue profile image processing for subject %s", subject)
 
     return {"picture": picture_url, "user": user_profile_payload(session, include_tokens=True)}
 
 
 @router.put("/profile/preferences")
-async def update_profile_preferences(request: Request, payload: PreferencesUpdateRequest) -> dict:
-    session = await require_session(request)
+async def update_profile_preferences(
+    request: Request,
+    payload: PreferencesUpdateRequest,
+    session: dict = Depends(require_permissions("profile:preferences:write")),
+) -> dict:
     require_csrf(request, session)
 
     access_token = session.get("access_token")
@@ -246,7 +290,7 @@ async def update_profile_preferences(request: Request, payload: PreferencesUpdat
         }
 
     session["preferences"] = next_preferences
-    await _persist_session(request, session)
+    await _persist_session(request, session, required_permission="profile:preferences:write")
 
     subject = session.get("sub")
     if isinstance(subject, str) and subject.strip():
@@ -256,5 +300,14 @@ async def update_profile_preferences(request: Request, payload: PreferencesUpdat
             name=session.get("name"),
             preferences=next_preferences,
         )
+
+    await get_activity_logger(request).log_event(
+        request=request,
+        event_type="profile.preferences_updated",
+        event_category="profile",
+        status_code=status.HTTP_200_OK,
+        session=session,
+        metadata={"preferences": next_preferences},
+    )
 
     return {"preferences": next_preferences, "user": user_profile_payload(session, include_tokens=True)}
