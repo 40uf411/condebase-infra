@@ -1,126 +1,136 @@
 # Keycloak User Fields, Classes, Ranks, and Roles
 
-This guide explains how to:
+Guide for modeling business identity data in Keycloak and exposing it to this app.
 
-1. Add domain-specific fields to users.
-2. Model classes and ranks.
-3. Expose that data to this app through OIDC claims.
+## What To Use For What
 
-## What to Use for What
+### User profile attributes
 
-Use these Keycloak features intentionally:
+Use for structured domain metadata:
 
-1. User profile attributes:
-For business/domain metadata, for example `employee_id`, `department`, `guild_name`, `user_class`, `rank`, `web-prefrences`.
+- `employee_id`
+- `department`
+- `team`
+- `user_class`
+- `rank`
+- `web-prefrences` (project compatibility key)
 
-2. Groups:
-For hierarchical classification, for example `/class/mage`, `/rank/gold`.
+### Groups
 
-3. Roles:
-For permissions/authorization, for example `admin`, `moderator`, `can_manage_users`.
+Use for hierarchical classification:
 
-Recommended model:
+- `/class/mage`
+- `/class/warrior`
+- `/rank/gold`
+- `/rank/silver`
 
-1. Class and rank as groups.
-2. Permissions as roles.
-3. Extra metadata as user attributes.
+### Roles
 
-## Add Domain-Specific User Fields
+Use for authorization intent:
 
-In Keycloak Admin Console (`https://auth.local/admin`):
+- `admin`
+- `manager`
+- `can_manage_users`
+- `can_assign_rank`
 
-1. Select realm `auth_app`.
-2. Go to `Realm settings -> User profile`.
-3. Add each custom attribute (for example `department`, `user_class`, `rank`).
-4. Configure display and validation:
-Set display name, optional help text, and validators (`length`, `pattern`, `options`, etc.).
-5. Configure permissions:
-Choose who can view/edit each field (admins only, users, or both).
+Recommended pattern:
 
-Notes:
+1. Class/rank in groups.
+2. Permissions in roles.
+3. Additional metadata in attributes.
 
-1. Attribute names should be stable and lowercase snake_case (for example `user_class`).
-2. If values come from a fixed list, prefer an `options` validator.
-3. The backend currently uses the attribute key `web-prefrences` (typo preserved for compatibility). Keep this exact key unless you migrate backend parsing and stored data.
+## Create Custom User Attributes
 
-## Add Classes and Ranks
+In Keycloak admin:
 
-### Option A: Using Groups (Recommended)
+1. Open `https://auth.local/admin`.
+2. Select realm `auth_app`.
+3. Go to `Realm settings -> User profile`.
+4. Add attributes.
+5. Configure:
+   - display name
+   - validators (`length`, `pattern`, `options`)
+   - who can view/edit
 
-1. Go to `Groups`.
-2. Create hierarchy:
-`/class/warrior`, `/class/mage`, `/class/archer`, `/rank/bronze`, `/rank/silver`, `/rank/gold`.
-3. Open each user and assign one class group and one rank group.
+Guidelines:
 
-Advantages:
+- Use stable lowercase snake_case names.
+- Prefer finite option validators for controlled values.
+- Keep attribute names backward compatible after release.
 
-1. Clean hierarchy.
-2. Easy filtering in admin.
-3. Works well with group membership claims.
+## Special Compatibility Attribute
 
-### Option B: Using Attributes
+This project currently expects `web-prefrences` (spelling preserved for compatibility with existing sessions/data).
 
-Store class/rank directly in user attributes (`user_class`, `rank`) with an `options` validator.
+If you rename it, you must update:
 
-Advantages:
+- `backend/app/domain/preferences.py`
+- existing user data in Keycloak
+- any dependent session parsing logic
 
-1. Simpler if you do not need hierarchy.
-2. Easy to edit during profile updates.
+## Model Class and Rank
 
-### Option C: Using Roles
+### Option A: Groups (recommended)
 
-Define roles like `class_mage`, `rank_gold`.
-Use this only if class/rank should also drive authorization.
+1. Create groups under `/class/*` and `/rank/*`.
+2. Assign one class and one rank group per user.
 
-## Expose Fields to the App (Claims)
+Why:
 
-This project reads user data from OIDC `userinfo` during login callback, then stores it in backend session state.
+- hierarchy support
+- clean admin filtering
+- easy claim mapping via group membership mapper
 
-To expose custom fields:
+### Option B: Attributes
 
-1. Open `Clients -> auth-app-bff -> Client scopes`.
-2. Choose a scope (`profile` or a dedicated custom scope).
+Store class/rank as attributes (`user_class`, `rank`) when hierarchy is unnecessary.
+
+### Option C: Roles
+
+Use only if class/rank should also directly affect authorization checks.
+
+## Expose Data As OIDC Claims
+
+The backend reads claims from `userinfo` on login callback and stores them in session payload.
+
+Configure claims:
+
+1. `Clients -> auth-app-bff -> Client scopes`.
+2. Choose `profile` or dedicated custom scope.
 3. Add protocol mappers:
-`User Attribute` mapper for each custom field:
-`user_class -> claim user_class`
-`rank -> claim rank`
-`department -> claim department`
-4. For groups, add `Group Membership` mapper.
-5. For roles, add `Realm roles` and/or `Client roles` mapper.
-6. Ensure mappers are enabled for `userinfo`.
+   - `User Attribute` for each custom attribute
+   - `Group Membership` for groups
+   - `Realm roles` and/or `Client roles` for roles
+4. Ensure mappers are enabled for `userinfo`.
 
-## Verify in This Project
-
-After changing fields/groups/mappers:
+## Verify In This Project
 
 1. Log out and log in again.
 2. Open `https://app.local/profile`.
-3. Check the `All User Claims` panel.
-4. Optionally inspect:
-`GET https://app.local/api/auth/me`
-`GET https://app.local/api/profile`
+3. Inspect claim panels in UI.
+4. Optional API verification:
+   - `GET https://app.local/api/auth/me`
+   - `GET https://app.local/api/profile`
 
 Important:
 
-1. Existing backend sessions cache claims from login time.
-2. Mapper/profile changes do not appear until the next login.
-
-## Suggested Conventions
-
-1. Attributes:
-`department`, `team`, `user_class`, `rank`, `web-prefrences`.
-2. Groups:
-`/class/*`, `/rank/*`, `/org/*`.
-3. Roles:
-`admin`, `manager`, `can_edit_rank`, `can_assign_class`.
+- Claims are session-cached at login time.
+- Mapper/profile changes appear only after new login.
 
 ## Troubleshooting
 
-1. Field exists in Keycloak but is missing in app:
-Check mapper exists and is included in `userinfo`.
+### Attribute missing in app
 
-2. Value changed in Keycloak but old value still shown:
-Log out and log in again to refresh backend session claims.
+- Mapper missing or disabled on `userinfo`.
+- Wrong client scope assignment.
+- Session not refreshed (re-login required).
 
-3. Class/rank not visible as groups:
-Verify user is assigned the correct groups and the group mapper is active.
+### Group claims missing
+
+- User not assigned to expected groups.
+- Group membership mapper missing.
+
+### Role claims missing
+
+- Role mapper missing for realm/client roles.
+- Role assigned in wrong realm or wrong client.

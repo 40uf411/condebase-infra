@@ -21,13 +21,18 @@ async function parseJsonIfAvailable(response) {
 }
 
 function createRequestError(response, payload) {
+  const envelope = payload && typeof payload === "object" && payload.error && typeof payload.error === "object" ? payload.error : null;
+  const envelopeDetails = envelope && typeof envelope.details === "object" ? envelope.details : null;
+
   const retryAfterHeader = response.headers.get("retry-after");
-  const retryAfterPayload = payload?.retryAfterSeconds;
+  const retryAfterPayload = envelopeDetails?.retryAfterSeconds ?? payload?.retryAfterSeconds;
   const retryAfterRaw = retryAfterPayload ?? retryAfterHeader;
   const retryAfterSeconds = Number.isFinite(Number(retryAfterRaw)) ? Number(retryAfterRaw) : null;
 
   let detail = `Request failed with status ${response.status}`;
-  if (typeof payload?.detail === "string" && payload.detail.trim()) {
+  if (typeof envelope?.message === "string" && envelope.message.trim()) {
+    detail = envelope.message;
+  } else if (typeof payload?.detail === "string" && payload.detail.trim()) {
     detail = payload.detail;
   }
 
@@ -40,10 +45,27 @@ function createRequestError(response, payload) {
 
   const error = new Error(detail);
   error.status = response.status;
+  error.code = typeof envelope?.code === "string" ? envelope.code : null;
+  error.details = envelope?.details ?? null;
   error.payload = payload;
   error.retryAfterSeconds = retryAfterSeconds;
-  error.requestId = response.headers.get("x-request-id");
+  error.requestId = envelope?.requestId || response.headers.get("x-request-id");
   return error;
+}
+
+export function resolveApiErrorMessage(error, fallbackMessage = "Request failed") {
+  if (error instanceof Error && typeof error.message === "string" && error.message.trim()) {
+    return error.message;
+  }
+  return fallbackMessage;
+}
+
+export function getApiValidationIssues(error) {
+  if (!error || typeof error !== "object") {
+    return [];
+  }
+  const issues = error.details?.issues;
+  return Array.isArray(issues) ? issues : [];
 }
 
 async function requestJson(path, options = {}) {

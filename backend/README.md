@@ -1,67 +1,155 @@
 # Backend
 
-FastAPI BFF for Keycloak auth flows with Redis-backed sessions.
+FastAPI BFF service for Keycloak-based authentication, session management, security controls, business entity CRUD, and async processing.
+
+## Directory Layout
+
+```text
+backend/
+  alembic/                  # migration env + revisions
+  app/
+    api/                    # routers + dependencies
+    core/                   # settings, security, authorization, errors
+    domain/                 # business normalization rules
+    entities/               # entity model schema parser/validator
+    generated/              # normalized entity model JSON
+    notifications/          # provider abstraction + templates
+    services/               # OIDC, sessions, jobs, media, logging
+    stores/                 # Redis/PostgreSQL persistence adapters
+    main.py                 # application bootstrap
+    worker.py               # background worker entrypoint
+  scripts/                  # generators and utility scripts
+  examples/                 # sample entity model input
+  alembic.ini
+  requirements.txt
+```
 
 ## Security Backbone
 
-- Signed session cookies with key-id based secret rotation support.
-- Redis-backed global/API and auth-specific rate limiting.
-- Login brute-force lockouts by client IP.
-- Security headers middleware (`HSTS`, `X-Frame-Options`, `X-Content-Type-Options`, etc.).
-- RBAC permission checks with reusable route dependencies.
-- Persistent activity logging (`activity_logs`) for request and auth/profile security events.
-- Redis-backed background job queue with dedicated worker process.
-- Notification module with provider abstraction (`log`, `smtp`, `ses`) and file-based email templates.
+- Signed session cookie with key-id based secret rotation.
+- Global and auth flow rate limits with Redis counters.
+- Login brute-force protection by client IP.
+- Security headers middleware.
+- CSRF enforcement for state-changing endpoints.
+- RBAC permission checks via reusable dependencies.
+- Persistent activity logging (`activity_logs`).
 
-### Session Secret Rotation
+## API Conventions
 
-1. Add the new secret under a new key id in `SESSION_SIGNING_KEYS`.
-2. Switch `SESSION_SIGNING_ACTIVE_KEY_ID` to the new key id.
-3. Keep the previous key in `SESSION_SIGNING_KEYS` until old sessions expire.
+### Error Envelope
 
-## Structure
+All failures return:
 
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "details": {
+      "issues": [
+        {
+          "field": "body.language",
+          "message": "Language must not be empty",
+          "type": "value_error"
+        }
+      ]
+    },
+    "status": 422,
+    "requestId": "..."
+  }
+}
 ```
-app/
-  api/         # HTTP layer: routers and request dependencies
-  core/        # Configuration and security utilities
-  domain/      # Business rules and preference normalization
-  services/    # Keycloak, media, session, and response composition logic
-  stores/      # Redis and Postgres persistence adapters
-  main.py      # Application bootstrap (lifespan, middleware, mounts)
-```
+
+### Pagination
+
+Entity bulk reads use `limit` and `offset`.
+
+### Soft Delete
+
+Generated entity deletes set `deleted_at` and keep rows in place.
 
 ## Endpoints
 
+### Health
+
 - `GET /healthz`
+
+### Auth
+
 - `GET /auth/login?returnTo=/profile`
 - `GET /auth/register?returnTo=/profile`
 - `GET /auth/callback`
 - `GET /auth/me`
-- `POST /auth/logout`
+- `POST /auth/logout` (CSRF)
+
+### Profile
+
 - `GET /profile`
-- `POST /profile/picture` (multipart upload, CSRF-protected)
-- `PUT /profile/preferences` (JSON, CSRF-protected)
-- `POST /jobs/email/template` (admin permission)
-- `POST /jobs/email/raw` (admin permission)
-- `POST /jobs/webhook` (admin permission)
-- `POST /jobs/image-process` (admin permission)
-- `POST /jobs/task` (admin permission)
-- `GET /jobs/metrics` (admin permission)
-- `GET /entities` (metadata list)
-- `POST /entities/{entity}/records`
-- `GET /entities/{entity}/records` (paged, optional `q` search)
+- `POST /profile/picture` (multipart + CSRF)
+- `PUT /profile/preferences` (JSON + CSRF)
+
+### Jobs (admin permission)
+
+- `POST /jobs/email/template`
+- `POST /jobs/email/raw`
+- `POST /jobs/webhook`
+- `POST /jobs/image-process`
+- `POST /jobs/task`
+- `GET /jobs/metrics`
+
+### Generated Entities
+
+- `GET /entities` (metadata)
+- `POST /entities/{entity}/records` (CSRF)
+- `GET /entities/{entity}/records` (paged, optional `q`)
 - `GET /entities/{entity}/records/{id}` (`id` must be UUID)
-- `PATCH /entities/{entity}/records/{id}`
-- `DELETE /entities/{entity}/records/{id}` (soft delete)
+- `PATCH /entities/{entity}/records/{id}` (CSRF)
+- `DELETE /entities/{entity}/records/{id}` (soft delete + CSRF)
 
-## Environment
+## Database Schema Ownership
 
-See `.env.example` for required settings.
+- Core tables (`app_users`, `activity_logs`) are migration-managed through Alembic.
+- Generated business entity tables are model-driven through `EntityStore` at startup.
+
+Run migrations from `backend/`:
+
+```bash
+alembic upgrade head
+```
+
+Create a revision:
+
+```bash
+alembic revision -m "describe change"
+```
 
 ## Entity Model Generator
 
-1. Define entities in JSON (see `examples/entities_model.example.json`).
-2. Generate normalized model:
-   `python scripts/generate_entities.py --input examples/entities_model.example.json --output app/generated/entities_model.json`
-3. Start backend; tables and CRUD endpoints are initialized automatically from the generated model.
+Generate normalized entity model JSON:
+
+```bash
+cd backend
+python scripts/generate_entities.py --input examples/entities_model.example.json --output app/generated/entities_model.json
+```
+
+Rules:
+
+- Primary key must be base `id`.
+- Reserved base fields cannot be redefined.
+- Foreign keys must use `table.column` format.
+- Searchable fields are validated against defined attributes.
+
+## Background Jobs and Notifications
+
+- Worker queue backend: Redis.
+- Job types: template email, raw email, webhook, image-processing, generic async task.
+- Notification providers:
+  - `log`
+  - `smtp`
+  - `ses`
+
+## Local Development Notes
+
+- See `.env.example` for required settings.
+- Backend container startup applies migrations before boot.
+- When changing entity model JSON, regenerate file and restart backend.

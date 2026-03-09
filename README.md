@@ -1,75 +1,71 @@
 # Keycloak Docker Auth App
 
-Local auth stack with Keycloak (`auth.local`), FastAPI backend, Redis sessions, and React SPA (`app.local`).
+Production-style local auth platform using:
 
-Backend traffic for the SPA is same-origin through `https://app.local/api/*` (proxied by Caddy to FastAPI), which keeps cookie auth stable in modern browsers.
+- Keycloak (`auth.local`)
+- FastAPI backend BFF (`api.local`, proxied under `app.local/api`)
+- React SPA (`app.local`)
+- Redis for sessions, rate-limit counters, and background queue
+- PostgreSQL for app data (`app_users`, `activity_logs`, generated entity tables)
 
-## Documentation
+## Documentation Index
 
-- `docs/CODE_STRUCTURE.md`: repository architecture, runtime flow, and security controls.
-- `docs/FUNCTION_REFERENCE.md`: backend/frontend function reference.
-- `docs/KEYCLOAK_USER_FIELDS_AND_ROLES.md`: how to add custom user fields, classes/ranks, and roles in Keycloak.
-- `frontend/keycloak-theme/README.md`: Keycloakify theme build and customization notes.
+- `docs/CODE_STRUCTURE.md`: architecture, runtime flow, and module layout.
+- `docs/FUNCTION_REFERENCE.md`: backend/frontend function-level reference.
+- `docs/KEYCLOAK_USER_FIELDS_AND_ROLES.md`: Keycloak attribute/group/role modeling.
+- `docs/RUNBOOK_DEPLOY.md`: release deployment checklist.
+- `docs/RUNBOOK_ROLLBACK.md`: rollback procedure.
+- `docs/RUNBOOK_RESTORE.md`: restore procedure.
+- `docs/RUNBOOK_INCIDENT_CHECKLIST.md`: incident response checklist.
+- `frontend/keycloak-theme/README.md`: theme build and Keycloak packaging.
+- `backend/README.md`: backend-specific implementation and operations guide.
 
 ## Architecture At A Glance
 
-- `https://app.local` -> React + Vite SPA.
-- `https://app.local/api/*` -> FastAPI backend (via Caddy reverse proxy).
-- `https://auth.local` -> Keycloak UI and OIDC endpoints.
-- `https://api.local` -> direct backend host (kept for diagnostics/manual API checks).
-- Redis stores login state and authenticated sessions.
-- A dedicated background worker processes queued email, webhook, image-processing, and async task jobs.
+- `https://app.local`: React SPA.
+- `https://app.local/api/*`: FastAPI backend through Caddy same-origin proxy.
+- `https://api.local`: direct backend endpoint for diagnostics.
+- `https://auth.local`: Keycloak admin and OIDC endpoints.
+- Redis stores login state, sessions, rate-limit counters, and job queues.
+- Worker service consumes async jobs (email, webhooks, image processing, generic tasks).
 
-## Core Functionality
+Same-origin proxying through `app.local/api` is intentional. It avoids cross-site cookie issues and keeps browser auth behavior stable.
 
-- Login with Keycloak using OAuth 2.0 Authorization Code + PKCE.
-- Registration flow via Keycloak (`kc_action=register`).
-- Session-based auth at backend (not token-in-browser architecture).
-- Profile page showing user claims and tokens from backend session payload.
-- Global user prefrences  for language and theme (`light` / `dark`) with i18n dictionaries.
-- Preference persistence to Keycloak user attribute `web-prefrences` and mirrored app DB table `app_users`.
-- Logout through backend + Keycloak RP-initiated logout.
-- Forced login prompt on login action (`prompt=login`) so Keycloak login screen appears even when IdP SSO exists.
-- Custom Keycloakify login/register theme packaged into the Keycloak container.
+## Core Capabilities
 
-## Protocols And Security Mechanisms
+### Authentication and Session
 
-- OIDC/OAuth 2.0:
-  - Authorization endpoint (`/protocol/openid-connect/auth`)
-  - Token endpoint (`/protocol/openid-connect/token`)
-  - UserInfo endpoint (`/protocol/openid-connect/userinfo`)
-  - RP-initiated logout (`/protocol/openid-connect/logout`)
-- PKCE:
-  - `code_challenge_method=S256`, verifier stored temporarily in Redis.
-- HTTPS/TLS:
-  - Caddy serves local TLS certs (`tls internal`) for `app.local`, `api.local`, `auth.local`.
-- Cookie session auth:
-  - `app_session` (HttpOnly) and `csrf_token` cookies, backend-validated session in Redis.
-  - HMAC-signed session cookie with key-id based signing-key rotation support.
-- Host-only cookie fallback for single-label domains (`.local` config is normalized to host-only).
-- CSRF protection:
-  - Double-submit pattern: `csrf_token` cookie + `X-CSRF-Token` header + session token match.
-- Security hardening:
-  - Redis-backed global/auth rate limits, login brute-force lockouts, and strict security response headers.
-  - RBAC permission checks for protected route/service actions.
-  - Persistent `activity_logs` audit table for request/auth/profile/security events.
-- Background and notifications:
-  - Redis queue and worker for async jobs (emails, webhooks, image processing, generic tasks).
-  - Notification module with provider abstraction (`log`, `smtp`, `ses`) and reusable email templates.
-- Business model expansion:
-  - JSON-driven entity model generator with automatic table creation and secured CRUD endpoints.
-  - Base entity fields on every generated model: `id` (UUID), `created_at`, `updated_at`, `deleted_at` (soft delete).
-- CORS:
-  - Explicit origin allow-list, credentials enabled, wildcard blocked by settings validation.
+- OAuth 2.0 Authorization Code + PKCE with Keycloak.
+- Registration entry path (`kc_action=register`).
+- Session-based BFF architecture (tokens stored server-side, not in browser storage).
+- RP-initiated logout through backend + Keycloak.
 
-## 1. Prerequisites
+### Security Backbone
+
+- Signed session cookie with key-id based secret rotation.
+- Global and auth-specific rate limits (Redis counters).
+- Login brute-force protection with temporary client-IP blocks.
+- CSRF double-submit protection (`csrf_token` cookie + `X-CSRF-Token` header + session token).
+- Security headers middleware.
+- RBAC permissions (route/service level).
+- Persistent activity logs (`activity_logs`).
+- Standard API error envelope for all failures.
+
+### Maintainability and Platform Growth
+
+- Alembic migrations for core schema versioning (`app_users`, `activity_logs`).
+- JSON-driven business model generator and dynamic CRUD (`/entities/*`).
+- Notification module with provider abstraction (`log`, `smtp`, `ses`) and templates.
+- Background job queue + worker with retry/dead-letter behavior.
+
+## Prerequisites
 
 - Docker Desktop
-- Caddy installed at `C:\Tools\Caddy\caddy.exe`
-- External PostgreSQL for Keycloak (`keycloak` DB)
-- External PostgreSQL for app backend (`appdb` DB used for `app_users` table)
+- Caddy at `C:\Tools\Caddy\caddy.exe`
+- PostgreSQL database for Keycloak
+- PostgreSQL database for backend app data
 
-## 2. Hosts File
+## Hosts File
 
 Add:
 
@@ -79,14 +75,16 @@ Add:
 127.0.0.1 app.local
 ```
 
-## 3. Configure Environment
+## Configuration
 
-Edit `infra/.env` and set:
+1. Copy `infra/.env.example` to `infra/.env`.
+2. Set at minimum:
+   - `KEYCLOAK_CLIENT_SECRET`
+   - `DATABASE_URL`
+   - `SESSION_SIGNING_KEYS`
+   - `SESSION_SIGNING_ACTIVE_KEY_ID`
 
-- `KEYCLOAK_CLIENT_SECRET`
-- any DB overrides needed for your local setup
-
-## 4. Configure Keycloak Client
+## Keycloak Client Setup
 
 Realm: `auth_app`  
 Client: `auth-app-bff` (confidential)
@@ -94,59 +92,84 @@ Client: `auth-app-bff` (confidential)
 - Valid redirect URIs:
   - `https://app.local/api/auth/callback`
   - optional compatibility: `https://api.local/auth/callback`
-- Valid post logout redirect URIs: `https://app.local/*`
-- Web origins: `https://app.local`
-- Standard flow enabled
+- Valid post-logout redirect URIs:
+  - `https://app.local/*`
+- Web origins:
+  - `https://app.local`
+- Standard flow:
+  - enabled
+- Optional self-service registration:
+  - Realm Settings -> Login -> `User registration` = ON
 
-Optional for self-service registration:
-
-- Realm settings -> Login -> `User registration` = ON
-
-## 5. Start Services
+## Start The Stack
 
 ```powershell
 cd infra
 docker compose up --build
 ```
 
-`docker compose up --build` also builds the `keycloak` image from `frontend/keycloak-theme/Dockerfile.keycloak` and injects the generated theme JAR.
+`backend` runs `alembic upgrade head` before starting the API server.
 
-## 6. Start Caddy
+Start Caddy:
 
 ```powershell
 C:\Tools\Caddy\caddy.exe run --config A:\workspace\keycloak-docker\infra\Caddyfile --adapter caddyfile
 ```
 
-## 7. Endpoints
+## Verify Endpoints
 
-- `https://app.local` SPA
-- `https://app.local/api/healthz` backend health through same-origin proxy
-- `https://api.local/healthz` direct backend health
-- `https://auth.local` Keycloak
+- `https://app.local`
+- `https://app.local/api/healthz`
+- `https://api.local/healthz`
+- `https://auth.local`
 
-## 8. Runtime Auth Flow
+## Runtime Flow Summary
 
-1. SPA calls `GET /api/auth/me` on load.
-2. Login/Register redirects browser to `/api/auth/login` or `/api/auth/register`.
-3. Backend stores one-time OIDC state + PKCE verifier in Redis.
-4. Keycloak redirects to `/api/auth/callback` with `code` + `state`.
-5. Backend exchanges code, fetches userinfo, creates Redis session, sets cookies, redirects to `/profile`.
-6. SPA reads authenticated state and fetches `/api/profile`.
-7. Theme/language updates call `PUT /api/profile/prefrences `, then backend updates Keycloak attribute + `app_users` table.
+1. SPA loads and calls `GET /api/auth/me`.
+2. Login/Register redirects to `/api/auth/login` or `/api/auth/register`.
+3. Backend stores one-time `state` + PKCE verifier in Redis.
+4. Keycloak callback reaches `/api/auth/callback` with `code` and `state`.
+5. Backend exchanges code, fetches userinfo, creates Redis session, sets cookies.
+6. SPA reads auth state and profile.
+7. Preference updates call `PUT /api/profile/preferences`.
+8. Logout calls `POST /api/auth/logout`.
 
-## 9. Activate Custom Keycloak Theme
+## Business Entity Expansion
 
-In Keycloak Admin Console:
+1. Define entities in JSON (see `backend/examples/entities_model.example.json`).
+2. Generate normalized model:
 
-1. Open `https://auth.local/admin`.
-2. Select realm `auth_app`.
-3. Go to `Realm settings` -> `Themes`.
-4. Set `Login Theme` to `auth-console-theme`.
-5. Click `Save`.
+```bash
+cd backend
+python scripts/generate_entities.py --input examples/entities_model.example.json --output app/generated/entities_model.json
+```
 
-If the updated styling does not appear immediately, clear browser cache and restart the `keycloak` container once.
+3. Start backend and use `/entities/*` endpoints.
+
+All generated entities include base columns:
+
+- `id` (`UUID`, primary key)
+- `created_at`
+- `updated_at`
+- `deleted_at` (soft delete)
+
+## Standard Error Envelope
+
+All API errors use:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "details": {},
+    "status": 422,
+    "requestId": "..."
+  }
+}
+```
 
 ## Notes
 
-- Tokens are stored server-side in Redis session payload and shown by the profile screen for inspection.
-- Callback `state` is one-time and consumed; revisiting callback URLs manually will return `Invalid or expired state`.
+- The Keycloak web preference attribute key is currently `web-prefrences` (intentional compatibility).
+- Callback `state` values are one-time; replaying callback URLs returns an invalid/expired state error.

@@ -19,22 +19,7 @@ class AppUserStore:
 
     async def initialize(self) -> None:
         async with self._engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS app_users (
-                        sub TEXT PRIMARY KEY,
-                        email TEXT NULL,
-                        name TEXT NULL,
-                        preferred_language VARCHAR(16) NOT NULL DEFAULT 'en',
-                        theme VARCHAR(16) NOT NULL DEFAULT 'light',
-                        web_preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-            )
+            await connection.execute(text("SELECT 1"))
 
     async def upsert_user(
         self,

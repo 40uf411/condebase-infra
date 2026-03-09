@@ -17,51 +17,7 @@ class ActivityStore:
 
     async def initialize(self) -> None:
         async with self._engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS activity_logs (
-                        id BIGSERIAL PRIMARY KEY,
-                        event_type TEXT NOT NULL,
-                        event_category TEXT NOT NULL,
-                        actor_sub TEXT NULL,
-                        session_id TEXT NULL,
-                        method VARCHAR(12) NULL,
-                        path TEXT NULL,
-                        status_code INTEGER NULL,
-                        ip_address TEXT NULL,
-                        user_agent TEXT NULL,
-                        request_id TEXT NULL,
-                        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-            )
-            await connection.execute(
-                text(
-                    """
-                    CREATE INDEX IF NOT EXISTS ix_activity_logs_created_at
-                    ON activity_logs (created_at DESC)
-                    """
-                )
-            )
-            await connection.execute(
-                text(
-                    """
-                    CREATE INDEX IF NOT EXISTS ix_activity_logs_actor_sub
-                    ON activity_logs (actor_sub)
-                    """
-                )
-            )
-            await connection.execute(
-                text(
-                    """
-                    CREATE INDEX IF NOT EXISTS ix_activity_logs_event_type
-                    ON activity_logs (event_type)
-                    """
-                )
-            )
+            await connection.execute(text("SELECT 1"))
 
     async def append(
         self,

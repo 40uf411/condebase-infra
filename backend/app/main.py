@@ -4,13 +4,20 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import JSONResponse
 
 from .api.router import api_router
 from .api.deps import optional_session
 from .core.config import get_settings
+from .core.errors import (
+    error_response,
+    http_exception_handler,
+    request_validation_exception_handler,
+    unhandled_exception_handler,
+)
 from .core.security import request_client_ip
 from .notifications import NotificationService
 from .services.activity_logger import ActivityLogger
@@ -66,6 +73,9 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -111,16 +121,22 @@ async def security_and_activity_middleware(request, call_next):
             window_seconds=settings.global_rate_limit_window_seconds,
         )
         if not rate_limit_result.allowed:
-            response = JSONResponse(
+            response = error_response(
+                request,
                 status_code=429,
-                content={
-                    "detail": "Too many requests",
+                code="RATE_LIMITED",
+                message="Too many requests",
+                details={
                     "retryAfterSeconds": rate_limit_result.retry_after_seconds,
+                    "limit": rate_limit_result.limit,
+                    "current": rate_limit_result.current,
+                },
+                headers={
+                    "Retry-After": str(rate_limit_result.retry_after_seconds),
+                    "X-RateLimit-Limit": str(rate_limit_result.limit),
+                    "X-RateLimit-Remaining": "0",
                 },
             )
-            response.headers["Retry-After"] = str(rate_limit_result.retry_after_seconds)
-            response.headers["X-RateLimit-Limit"] = str(rate_limit_result.limit)
-            response.headers["X-RateLimit-Remaining"] = "0"
             response.headers["X-Request-ID"] = request.state.request_id
             _apply_security_headers(response)
             await request.app.state.activity_logger.log_event(

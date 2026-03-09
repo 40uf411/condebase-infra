@@ -1,21 +1,19 @@
 # Code Structure
 
-This document describes the current implementation, runtime flow, and security model.
+This document describes repository structure, runtime architecture, and operational boundaries.
 
 ## Top-Level Layout
 
 ```text
 keycloak-docker/
-  infra/                    # Docker Compose + Caddy reverse proxy
-  backend/                  # FastAPI BFF/auth service
-  frontend/                 # React + Vite SPA + Keycloak theme project
-    keycloak-theme/         # Keycloakify login/register theme source
-  docs/                     # Architecture and reference docs
-  caddy_run.txt             # Local Caddy run command
-  README.md                 # Setup/runbook + flow overview
+  infra/                    # Docker Compose, Caddy, environment files
+  backend/                  # FastAPI BFF + worker + migrations
+  frontend/                 # React SPA
+  docs/                     # architecture, function reference, runbooks
+  README.md                 # platform-level setup and flow
 ```
 
-## Infrastructure
+## Infrastructure Layer
 
 Primary files:
 
@@ -24,220 +22,199 @@ Primary files:
 - `infra/.env`
 - `infra/.env.example`
 
-Responsibilities:
+Services:
 
-- Starts `redis`, `keycloak`, `auth-backend`, `auth-worker`, and `auth-frontend`.
-- Builds Keycloak from `frontend/keycloak-theme/Dockerfile.keycloak`, bundling the custom theme JAR.
-- Uses external PostgreSQL for both Keycloak and the backend mirror table (`app_users`).
-- Terminates local TLS with Caddy (`tls internal`).
-- Routes:
-  - `https://auth.local` -> Keycloak (`localhost:8080`)
-  - `https://api.local` -> backend (`localhost:8000`) for direct diagnostics
-  - `https://app.local` -> frontend (`localhost:3000`)
-  - `https://app.local/api/*` -> backend (`localhost:8000`) through same-origin proxy
+- `redis`: session/cache/queue backbone.
+- `keycloak`: identity provider with custom theme image.
+- `backend`: FastAPI API server.
+- `worker`: async job consumer.
+- `frontend`: Vite/React app.
 
-Why same-origin `/api` matters:
+Traffic:
 
-- Browser session cookies are more reliable when SPA and API share the same site.
-- Reduces cross-site credential/cookie policy friction during local auth flows.
+- `https://app.local` -> frontend.
+- `https://app.local/api/*` -> backend (same-origin proxy).
+- `https://api.local` -> backend direct diagnostics endpoint.
+- `https://auth.local` -> Keycloak.
 
-## Backend
+Migration behavior:
 
-### Layout
+- Backend container runs `alembic upgrade head` before API startup.
+
+## Backend Layer
 
 ```text
 backend/
+  alembic/
+    env.py
+    versions/
   app/
     api/
-      deps.py               # Cookie/session/CSRF dependencies
-      router.py             # Aggregates all routers
+      deps.py
+      router.py
       routers/
-        auth.py             # /auth/login/register/callback/me/logout
-        entities.py         # /entities/* generated-model CRUD APIs
-        health.py           # /healthz
-        jobs.py             # /jobs/* enqueue + metrics
-        profile.py          # /profile + picture + preferences
+        auth.py
+        health.py
+        profile.py
+        jobs.py
+        entities.py
     core/
-      config.py             # Typed settings + validators
-      authorization.py      # Role extraction + permission checks
-      security.py           # PKCE + state + safe return-path helpers
+      config.py
+      security.py
+      authorization.py
+      errors.py
     domain/
-      preferences.py        # Preference normalize/serialize helpers
+      preferences.py
     entities/
-      model.py              # Entity model schema validation + normalization
-    services/
-      activity_logger.py    # Structured activity and security-event logger
-      job_executor.py       # Worker-side dispatcher for queued job types
-      job_queue.py          # Redis queue enqueue/dequeue/retry/dead-letter helpers
-      keycloak_oidc.py      # OIDC authorize/token/userinfo/logout + profile updates
-      media.py              # Avatar storage + validation helpers
-      rate_limit.py         # Redis-backed global/auth rate limits + bruteforce counters
-      serializers.py        # Session -> API profile payload mapping
-      sessions.py           # Session create/read/delete + TTL refresh
+      model.py
+    generated/
+      entities_model.json
     notifications/
-      service.py            # Template rendering + provider selection
-      providers/            # Email provider abstraction (log/smtp/ses)
-      templates/            # Reusable text/html email templates
+      providers/
+      templates/
+      service.py
+    services/
+      activity_logger.py
+      job_queue.py
+      job_executor.py
+      keycloak_oidc.py
+      rate_limit.py
+      sessions.py
+      serializers.py
+      media.py
     stores/
-      activity_store.py     # activity_logs table write adapter
-      entity_store.py       # Dynamic entity CRUD store with base UUID + soft-delete fields
-      redis_store.py        # Redis JSON helpers
-      user_store.py         # app_users table init + upsert
-    main.py                 # FastAPI app + lifespan initialization
-    worker.py               # Background worker process entrypoint
+      redis_store.py
+      user_store.py
+      activity_store.py
+      entity_store.py
+    main.py
+    worker.py
+  scripts/
+    generate_entities.py
+  examples/
+    entities_model.example.json
+  alembic.ini
   requirements.txt
-  .env.example
   Dockerfile
 ```
 
-### Runtime Flow
+## Backend Runtime Flow
 
-1. `GET /auth/login` or `GET /auth/register`
-- Backend generates OIDC `state` + PKCE verifier/challenge.
-- Stores one-time login state in Redis (`login_state:<state>`).
-- Redirects to Keycloak authorize endpoint.
-- Registration adds `kc_action=register`.
-- Login may pass `prompt=login` to force the Keycloak login screen.
+### App startup (`app/main.py`)
 
-2. `GET /auth/callback`
-- Validates and consumes one-time `state`.
-- Exchanges `code` for tokens at Keycloak token endpoint.
-- Calls Keycloak `userinfo` endpoint for claims.
-- Creates Redis session (`session:<session_id>`) with claims, tokens, CSRF token, and preferences.
-- Sets `app_session` and `csrf_token` cookies.
-- Redirects to SPA return path (default `/profile`).
+1. Load settings.
+2. Initialize stores/services:
+   - Redis store
+   - user store
+   - activity store
+   - entity store
+   - notification service
+   - job queue
+3. Attach initialized objects to `app.state`.
+4. Register middleware and global exception handlers.
 
-3. `GET /auth/me`
-- Resolves session from `app_session` cookie.
-- Returns:
-  - `authenticated` boolean
-  - `user` payload
-  - `csrfToken` for CSRF-protected requests
+### Request middleware
 
-4. `GET /profile`
-- Requires authenticated session.
-- Returns expanded profile payload (including tokens for debug UI).
+1. Generate `request_id`.
+2. Resolve optional authenticated session.
+3. Enforce global rate limits.
+4. Apply security headers.
+5. Log request event to activity log.
 
-5. `POST /profile/picture`
-- Requires authenticated session + CSRF token.
-- Accepts multipart image upload (`file`).
-- Saves avatar in `MEDIA_DIR/avatars`.
-- Updates session `picture` field and returns updated profile.
+### Auth flow
 
-6. `PUT /profile/preferences`
-- Requires authenticated session + CSRF token.
-- Validates `language` and `theme`.
-- Updates Keycloak account attribute (`web-prefrences`).
-- Handles access-token refresh once if Keycloak returns `401`.
-- Mirrors preferences into `app_users` and updates session payload.
+1. `/auth/login` or `/auth/register` issues OIDC state + PKCE and redirects to Keycloak.
+2. `/auth/callback` validates state, exchanges code, fetches claims, creates Redis session, sets cookies.
+3. `/auth/me` returns auth status + profile summary + CSRF token.
+4. `/auth/logout` enforces CSRF, clears session/cookies, returns Keycloak logout URL.
 
-7. `POST /auth/logout`
-- Requires authenticated session + CSRF token.
-- Deletes Redis session and clears auth cookies.
-- Returns Keycloak logout URL for frontend redirect.
+### Profile flow
 
-8. `POST /jobs/*` and `GET /jobs/metrics`
-- Admin permission-gated endpoints to enqueue async jobs and inspect queue metrics.
-- Worker process consumes queued jobs and handles retries/dead-letter routing.
+- `/profile`: authenticated profile payload.
+- `/profile/picture`: avatar upload + session update + background job enqueue.
+- `/profile/preferences`: update Keycloak preference attribute + session + app DB mirror.
 
-9. `GET/POST/PATCH/DELETE /entities/*`
-- Entity CRUD endpoints generated from `app/generated/entities_model.json`.
-- Every generated table includes base columns: `id`, `created_at`, `updated_at`, `deleted_at` (soft delete).
-- List reads are parameterized and paginated (`limit`/`offset`) with optional secure search (`q`).
+### Jobs flow
 
-### Session Model
+- `/jobs/*` endpoints enqueue work into Redis.
+- Worker process pulls queue, executes handlers, retries failures, and dead-letters exhausted jobs.
 
-- Session storage: Redis JSON payload keyed by session id.
-- Session cookie values are HMAC-signed with key-id support for secret rotation.
-- Sliding TTL: each successful read refreshes expiry.
-- Browser stores only session/CSRF cookies; tokens remain server-side.
-- Local profile-picture URL is persisted in session and rehydrated on login if a local avatar exists.
+### Dynamic entity flow
 
-### Cookie Model
+1. Generator validates and normalizes model JSON.
+2. Backend loads generated model at startup.
+3. `EntityStore` ensures tables/indexes exist for model entities.
+4. `/entities/*` provides secured CRUD:
+   - UUID id validation
+   - soft delete filter
+   - paginated list
+   - parameterized search
 
-- `app_session`: HttpOnly, secure session id cookie.
-- `csrf_token`: readable cookie used for `X-CSRF-Token`.
-- `cookie_domain` normalization:
-  - If configured domain is single-label (example `.local`), backend falls back to host-only cookies.
+## Data Ownership
 
-## Frontend
+### Migration-managed core schema
 
-### Layout
+- `app_users`
+- `activity_logs`
+- tracked by Alembic revisions under `backend/alembic/versions`
+
+### Model-driven generated schema
+
+- business entity tables from `app/generated/entities_model.json`
+- created/updated by `EntityStore` logic at startup
+
+## Security Model
+
+- OIDC Authorization Code + PKCE.
+- Cookie session auth (`app_session`) with HMAC signature and key rotation.
+- CSRF double-submit pattern.
+- Global and auth rate limits.
+- Login brute-force protection.
+- Security headers middleware.
+- RBAC permission checks (route and service-level usage).
+- Activity logging with request context.
+- Standard error envelope:
+  - `error.code`
+  - `error.message`
+  - `error.details`
+  - `error.status`
+  - `error.requestId`
+
+## Frontend Layer
 
 ```text
 frontend/
   src/
-    main.jsx               # React root + router wiring
-    App.jsx                # Route shell + auth/profile UI
-    api.js                 # Fetch wrappers and auth redirects
-    theme-light.js         # MUI light theme
-    theme-dark.js          # MUI dark theme
-    i18n/                  # language dictionaries + helpers
-    styles.css             # Visual system + animations (theme-variable based)
+    App.jsx
+    api.js
+    hooks/
+      useApiError.js
+    i18n/
+    styles.css
     styles/
-      theme-light.css      # CSS variable tokens for light mode
-      theme-dark.css       # CSS variable tokens for dark mode
-  index.html
-  package.json
-  vite.config.js
-  .env.example
-  Dockerfile
+      theme-light.css
+      theme-dark.css
+    theme-light.js
+    theme-dark.js
+    main.jsx
+  keycloak-theme/
+    ...
 ```
 
-### Runtime Behavior
+Frontend behavior:
 
-1. Startup calls `GET /api/auth/me` (`fetchAuthState`) with credentials.
-2. Signed-out state:
-- Shows login and registration actions.
-- Login uses `prompt=login` (forced credentials prompt).
-3. Signed-in state:
-- `/profile` fetches `GET /api/profile` and renders profile + token + claims panels.
-4. Preference updates:
-- UI calls `PUT /api/profile/preferences` (`updateUserPreferences`).
-- Backend persists preferences to Keycloak + `app_users` + session payload.
-5. Picture updates:
-- UI calls `POST /api/profile/picture` (`uploadProfilePicture`) with multipart form-data.
-6. Logout:
-- `POST /api/auth/logout` with `X-CSRF-Token`.
-- Browser redirects to backend-provided Keycloak logout URL.
+- `api.js` centralizes fetch calls and normalized API error parsing.
+- `useApiError` hook provides reusable error messaging/issue extraction.
+- `App.jsx` orchestrates auth state, navigation, profile actions, and preferences.
 
-## Keycloak Theme (Login/Register)
+## Keycloak Theme Layer
 
-### Layout
+- Source: `frontend/keycloak-theme/`
+- Build output JAR injected into Keycloak image by `frontend/keycloak-theme/Dockerfile.keycloak`.
+- Custom email theme files copied into Keycloak themes directory.
 
-```text
-frontend/keycloak-theme/
-  src/
-    main.tsx                         # Detect Keycloak context vs local dev mode
-    main-kc.tsx                      # Real Keycloak runtime entry
-    main-kc.dev.tsx                  # Local preview/dev entry
-    kc.gen.tsx                       # Generated by keycloakify update-kc-gen
-    login/                           # Login/register page implementation
-      styleLevelCustomization.tsx    # Class mapping + custom stylesheet loader
-  public/
-    theme-overrides.css              # Theme palette/layout overrides
-  Dockerfile.keycloak                # Multi-stage build that injects theme JAR into Keycloak
-  package.json
-```
+## Docs Layer
 
-### Runtime Behavior
-
-1. `keycloakify` builds a theme JAR into `dist_keycloak/`.
-2. `infra/docker-compose.yml` builds the `keycloak` service using `Dockerfile.keycloak`.
-3. The final Keycloak image copies the generated JAR to `/opt/keycloak/providers`.
-4. Realm setting `Login Theme` must be `auth-console-theme`.
-
-## Protocols And Security Controls
-
-- OIDC/OAuth 2.0 Authorization Code flow with PKCE.
-- HTTPS local TLS via Caddy for all public hosts.
-- Cookie-based backend sessions (BFF pattern).
-- CSRF double-submit protection.
-- Global and auth-flow specific rate limits (Redis counters).
-- Login brute-force lockouts per client identifier.
-- Route-level and service-level RBAC permission guards.
-- Security headers middleware and per-request request-id response header.
-- Persistent activity logging for HTTP, auth, profile, and security events.
-- Async processing backbone via Redis queue + worker for notification/webhook/image/task jobs.
-- Strict return path validation (`safe_return_to`) to block open redirects.
-- CORS allow-list with credentials and wildcard guardrails.
+- `docs/FUNCTION_REFERENCE.md`: function-level map.
+- `docs/KEYCLOAK_USER_FIELDS_AND_ROLES.md`: Keycloak modeling guide.
+- `docs/RUNBOOK_*.md`: deploy, rollback, restore, and incident operations.

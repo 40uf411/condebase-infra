@@ -61,6 +61,7 @@ import {
   SUPPORTED_LANGUAGES,
   translate,
 } from "./i18n";
+import { useApiError } from "./hooks/useApiError";
 
 const DEFAULT_PREFERENCES = {
   language: DEFAULT_LANGUAGE,
@@ -178,6 +179,7 @@ function App() {
   const [profileMenuAnchor, setProfileMenuAnchor] = useState(null);
 
   const dictionary = useMemo(() => getDictionary(preferences.language), [preferences.language]);
+  const { getErrorMessage } = useApiError();
   const t = useCallback((key, params) => translate(dictionary, key, params), [dictionary]);
   const callbackErrorMessage = useMemo(() => {
     const params = new URLSearchParams(location.search);
@@ -232,7 +234,7 @@ function App() {
         authenticated: false,
         user: null,
         csrfToken: null,
-        error: error instanceof Error ? error.message : t("sessionFetchFailed"),
+        error: getErrorMessage(error, t("sessionFetchFailed")),
       });
       setPreferences({ ...DEFAULT_PREFERENCES });
       appendTerminalLine(t("terminalSessionFailed"), "error");
@@ -273,7 +275,7 @@ function App() {
       }
       navigate("/", { replace: true });
     } catch (error) {
-      setLogoutError(error instanceof Error ? error.message : t("logoutFailed"));
+      setLogoutError(getErrorMessage(error, t("logoutFailed")));
       appendTerminalLine(t("terminalLogoutFailed"), "error");
     } finally {
       setLoggingOut(false);
@@ -317,14 +319,14 @@ function App() {
       } catch (error) {
         setPreferenceMessage({
           type: "error",
-          text: error instanceof Error ? error.message : t("savePreferencesError"),
+          text: getErrorMessage(error, t("savePreferencesError")),
         });
         appendTerminalLine(t("savePreferencesError"), "error");
       } finally {
         setSavingPreferences(false);
       }
     },
-    [authState.authenticated, authState.csrfToken, appendTerminalLine, preferences, t]
+    [authState.authenticated, authState.csrfToken, appendTerminalLine, getErrorMessage, preferences, t]
   );
 
   const preferenceAlert = useMemo(() => {
@@ -1046,6 +1048,7 @@ function ProfilePage({
   searchQuery,
   onTerminalLine,
 }) {
+  const { getErrorMessage } = useApiError();
   const [loading, setLoading] = useState(authenticated);
   const [profile, setProfile] = useState(null);
   const [error, setError] = useState(null);
@@ -1080,7 +1083,7 @@ function ProfilePage({
         if (!active) {
           return;
         }
-        setError(requestError instanceof Error ? requestError.message : t("profileLoadFailed"));
+        setError(getErrorMessage(requestError, t("profileLoadFailed")));
         setLoading(false);
         onTerminalLine(t("profileLoadFailed"), "error");
         if (requestError?.status === 401) {
@@ -1127,14 +1130,14 @@ function ProfilePage({
       } catch (uploadError) {
         setPictureMessage({
           type: "error",
-          text: uploadError instanceof Error ? uploadError.message : t("profilePictureUploadFailed"),
+          text: getErrorMessage(uploadError, t("profilePictureUploadFailed")),
         });
         onTerminalLine(t("profilePictureUploadFailed"), "error");
       } finally {
         setUploadingPicture(false);
       }
     },
-    [csrfToken, onSessionRefresh, onTerminalLine, t]
+    [csrfToken, getErrorMessage, onSessionRefresh, onTerminalLine, t]
   );
 
   if (!authenticated) {
